@@ -1,7 +1,7 @@
 {
 	"id": "bijitongbu",
 	"name": "Biji Tongbu",
-	"version": "2.11.1",
+	"version": "2.12.0",
 	"minAppVersion": "0.15.0",
 	"description": "Capture content from WeChat Official Accounts, Xiaohongshu, Dedao, Yuanbao, and Zhihu. Save chat records, images, and files with ease.",
 	"author": "NoteHelper Team",
