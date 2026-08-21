@@ -18,9 +18,9 @@ jobs:
   release:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v5
         with:
           node-version: "20"
           cache: npm
@@ -48,7 +48,7 @@ jobs:
       # 手动跑（workflow_dispatch）只当 lint + test + build 冒烟，不签也不发
       - name: Attest build provenance
         if: startsWith(github.ref, 'refs/tags/')
-        uses: actions/attest-build-provenance@v2
+        uses: actions/attest-build-provenance@v3
         with:
           subject-path: |
             main.js
