@@ -5,10 +5,17 @@
 
 import { BUILD_CONFIG } from './build-config'
 
-// 优先使用环境变量，其次使用构建配置
+// 优先使用环境变量，其次使用构建配置。
+// Obsidian 移动端（Capacitor WebView）没有 Node 的 process 全局，所以用
+// 本地 ambient 声明 + typeof 探测；jest（node 环境）下则能读到真实 env。
+declare const process:
+  | { env?: Record<string, string | undefined> }
+  | undefined
+const nodeEnv =
+  (typeof process !== 'undefined' && process ? process.env : undefined) ?? {}
 const isDevelopment =
-  process.env.DEV_MODE === 'true' ||
-  (process.env.PROD_MODE !== 'true' && BUILD_CONFIG.IS_DEVELOPMENT)
+  nodeEnv.DEV_MODE === 'true' ||
+  (nodeEnv.PROD_MODE !== 'true' && BUILD_CONFIG.IS_DEVELOPMENT)
 
 export class Logger {
   private static isDev = isDevelopment

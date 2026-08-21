@@ -1,6 +1,6 @@
 import esbuild from "esbuild";
 import process from "process";
-import { builtinModules } from "module";
+import { builtinModules as builtins } from 'node:module';
 
 const banner =
 `/*
@@ -41,12 +41,14 @@ esbuild.build({
 		'@lezer/common',
 		'@lezer/highlight',
 		'@lezer/lr',
-		...builtinModules],
+		...builtins],
 	format: 'cjs',
 	watch: !prod,
 	target: 'es2021',
 	logLevel: "info",
 	sourcemap: prod ? false : 'inline',
 	treeShaking: true,
+	// 生产构建压缩，体积约减半；dev/watch 保持可读 + inline sourcemap
+	minify: prod,
 	outfile: 'main.js',
 }).catch(() => process.exit(1));

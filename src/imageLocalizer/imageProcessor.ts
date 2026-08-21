@@ -3,41 +3,190 @@
  * 负责 MD5 计算、格式检测、PNG→JPEG 转换
  */
 
-import { Vault, normalizePath, TFolder } from 'obsidian'
+import { Vault, normalizePath, TAbstractFile, TFolder } from 'obsidian'
 import { log, logError } from '../logger'
-import { md5Hex } from './md5'
+// 市场版审核建议弃用 crypto-js（已停维护），换 js-md5（纯 JS、~10KB）。
+// 已实测两者对 Uint8Array 输入的 MD5 hex 输出逐字节一致 —— 哈希值决定图片
+// 本地化落盘文件名，跨版本必须完全不变，否则破坏老用户附件去重。
+import { md5 } from 'js-md5'
+
+const MD5_SAMPLE_SIZE = 15000
+const MD5_SAMPLE_THRESHOLD = MD5_SAMPLE_SIZE * 3
+
+function calculateHexMD5(data: Uint8Array): string {
+  return md5(data)
+}
 
 /**
- * MD5 分段采样计算（性能优化）
- * 只采样头部、中部、尾部各 15KB，大幅提升大文件处理速度
+ * 计算向后兼容的图片摘要：不超过 45KB 时哈希整包，超过时只哈希头、中、尾
+ * 各 15KB。采样摘要允许碰撞；saveImageToVault 会在复用同名文件前逐字节比对，
+ * 并为不同内容生成确定性的碰撞文件名。
+ *
+ * 保留采样算法是为了让老用户已落盘附件的文件名跨版本不变，同时避免在移动端
+ * 对每张大图执行纯 JS 整包哈希。完整内容哈希仅在确实发生同名碰撞时计算。
  */
 export function calculateMD5(data: ArrayBuffer): string {
-  const SAMPLE_SIZE = 15000 // 15KB
   const uint8Array = new Uint8Array(data)
-  const totalSize = uint8Array.length
+  let hashData = uint8Array
 
-  let sampledData: Uint8Array
-
-  if (totalSize <= SAMPLE_SIZE * 3) {
-    // 文件小于45KB，直接计算全部
-    sampledData = uint8Array
-  } else {
-    // 采样：头部 + 中部 + 尾部
-    const head = uint8Array.slice(0, SAMPLE_SIZE)
-    const middle = uint8Array.slice(
-      Math.floor(totalSize / 2) - Math.floor(SAMPLE_SIZE / 2),
-      Math.floor(totalSize / 2) + Math.floor(SAMPLE_SIZE / 2)
+  if (uint8Array.byteLength > MD5_SAMPLE_THRESHOLD) {
+    const middleStart = Math.floor(
+      (uint8Array.byteLength - MD5_SAMPLE_SIZE) / 2,
     )
-    const tail = uint8Array.slice(totalSize - SAMPLE_SIZE)
-
-    // 合并采样数据
-    sampledData = new Uint8Array(SAMPLE_SIZE * 3)
-    sampledData.set(head, 0)
-    sampledData.set(middle, SAMPLE_SIZE)
-    sampledData.set(tail, SAMPLE_SIZE * 2)
+    const sampled = new Uint8Array(MD5_SAMPLE_THRESHOLD)
+    sampled.set(uint8Array.subarray(0, MD5_SAMPLE_SIZE), 0)
+    sampled.set(
+      uint8Array.subarray(middleStart, middleStart + MD5_SAMPLE_SIZE),
+      MD5_SAMPLE_SIZE,
+    )
+    sampled.set(
+      uint8Array.subarray(uint8Array.byteLength - MD5_SAMPLE_SIZE),
+      MD5_SAMPLE_SIZE * 2,
+    )
+    hashData = sampled
   }
 
-  return `${md5Hex(sampledData)}_MD5`
+  return `${calculateHexMD5(hashData)}_MD5`
+}
+
+function arrayBuffersEqual(first: ArrayBuffer, second: ArrayBuffer): boolean {
+  if (first.byteLength !== second.byteLength) return false
+
+  // 先按 32 位分组比较，减少大图严格比对时的 JS 循环次数；两个视图从同一
+  // 字节偏移（0）按本机相同端序解释，所以 word 相等与对应 4 字节逐一相等
+  // 完全等价。不足 4 字节的尾部仍逐字节收尾，不做采样或概率判断。
+  const wordLength = Math.floor(first.byteLength / Uint32Array.BYTES_PER_ELEMENT)
+  const firstWords = new Uint32Array(first, 0, wordLength)
+  const secondWords = new Uint32Array(second, 0, wordLength)
+  for (let index = 0; index < wordLength; index++) {
+    if (firstWords[index] !== secondWords[index]) return false
+  }
+
+  const firstBytes = new Uint8Array(first)
+  const secondBytes = new Uint8Array(second)
+  for (
+    let index = wordLength * Uint32Array.BYTES_PER_ELEMENT;
+    index < firstBytes.length;
+    index++
+  ) {
+    if (firstBytes[index] !== secondBytes[index]) return false
+  }
+  return true
+}
+
+/**
+ * 读出某个路径已有的字节，并与待写入内容比较。
+ *
+ * 专供「createBinary 因路径已存在而失败」这条竞态路径：同一篇笔记里两张【内容相同】
+ * 的图会算出同一个文件名，在有界并发下会同时落盘。此时不能只查
+ * `getAbstractFileByPath` —— Obsidian 的 metadata cache 未必已经收录刚刚由另一路
+ * 并发写出的文件，返回 null 会让我们误判成「不是竞态」而把错误抛上去，那张图就
+ * 白白本地化失败了（2026-07-26 实测：image-localization 用例偶发红，单跑必绿）。
+ * 所以这里优先走 adapter（不经 metadata cache 的真实文件系统读），
+ * 不可用时再退回 Vault API。
+ */
+type RacedPathState = 'same' | 'different' | 'unreadable'
+
+async function inspectRacedPath(
+  vault: Vault,
+  filePath: string,
+  data: ArrayBuffer,
+): Promise<RacedPathState> {
+  const adapter = (vault as unknown as {
+    adapter?: { readBinary?: (p: string) => Promise<ArrayBuffer> }
+  }).adapter
+  if (adapter && typeof adapter.readBinary === 'function') {
+    try {
+      const existing = await adapter.readBinary(filePath)
+      return arrayBuffersEqual(existing, data) ? 'same' : 'different'
+    } catch {
+      // adapter 读不到 → 再给 Vault API 一次机会（轻量替身 / 旧宿主）
+    }
+  }
+  const file = vault.getAbstractFileByPath(filePath)
+  if (!file) return 'unreadable'
+  return (await fileHasSameContent(vault, file, data)) ? 'same' : 'different'
+}
+
+async function fileHasSameContent(
+  vault: Vault,
+  file: TAbstractFile,
+  data: ArrayBuffer,
+): Promise<boolean> {
+  let existingData: ArrayBuffer
+  // readBinary 声明只收 TFile，但这里刻意做鸭子类型双轨（真实 TFile / 只认路径的
+  // 轻量 Vault 替身），失败统一按「不同内容」处理，所以把方法放宽成结构化签名，
+  // 而不是把条目硬 cast 成 TFile。
+  const readBinary = vault.readBinary.bind(vault) as (
+    target: TAbstractFile | string,
+  ) => Promise<ArrayBuffer>
+  try {
+    // 对同名条目直接尝试移动端安全的 Vault API；若它实际是文件夹或已损坏，
+    // readBinary 会失败并按“不同内容”处理，不能误复用。
+    existingData = await readBinary(file)
+  } catch (error) {
+    try {
+      // 兼容只实现了路径参数的轻量 Vault 替身；真实 Obsidian 使用上面的 TFile。
+      existingData = await readBinary(file.path)
+    } catch {
+      logError(`读取已有图片失败，按文件名碰撞处理: ${file.path}`, error)
+      return false
+    }
+  }
+  return arrayBuffersEqual(existingData, data)
+}
+
+/**
+ * createFolder 失败后判断「目录其实已经可用」。
+ * 优先信 adapter（真实文件系统，不经 metadata cache），其次看 Vault API，
+ * 最后兜底认「already exists」文案 —— 三者都不成立才认为是真失败。
+ */
+async function folderUsable(
+  vault: Vault,
+  folderPath: string,
+  error: unknown,
+): Promise<boolean> {
+  const adapter = (vault as unknown as {
+    adapter?: { exists?: (p: string) => Promise<boolean> }
+  }).adapter
+  if (adapter && typeof adapter.exists === 'function') {
+    try {
+      if (await adapter.exists(folderPath)) return true
+    } catch {
+      // adapter 不可用 → 往下退
+    }
+  }
+  if (vault.getAbstractFileByPath(folderPath) instanceof TFolder) return true
+  const message = error instanceof Error ? error.message : String(error)
+  return /already exists/i.test(message)
+}
+
+/**
+ * 确保目录存在，且对**并发创建**免疫。
+ *
+ * 先查后建之间，另一路（同篇图片有界并发、或附件阶段）可能已经把目录建好，
+ * 而 metadata cache 未必已收录 → createFolder 抛「Folder already exists」。
+ * 这不是错误：吞掉它继续写文件，否则整张图/附件会白白本地化失败
+ * （2026-07-26 实测：image-localization 偶发只改写一半，pending retryCount=1）。
+ */
+export async function ensureFolderExists(
+  vault: Vault,
+  normalizedFolder: string,
+): Promise<void> {
+  if (vault.getAbstractFileByPath(normalizedFolder) instanceof TFolder) return
+  log(`创建文件夹: ${normalizedFolder}`)
+  try {
+    await vault.createFolder(normalizedFolder)
+  } catch (error) {
+    if (!(await folderUsable(vault, normalizedFolder, error))) throw error
+    log(`文件夹已由并发路径创建，继续: ${normalizedFolder}`)
+  }
+}
+
+function appendFileNameSuffix(fileName: string, suffix: string): string {
+  const extensionIndex = fileName.lastIndexOf('.')
+  if (extensionIndex <= 0) return `${fileName}${suffix}`
+  return `${fileName.slice(0, extensionIndex)}${suffix}${fileName.slice(extensionIndex)}`
 }
 
 /**
@@ -124,13 +273,14 @@ export async function convertPngToJpeg(
       img.onload = () => {
         try {
           // 创建 Canvas
-          const canvas = activeDocument.createEl('canvas')
+          const canvas = createEl('canvas')
           canvas.width = img.width
           canvas.height = img.height
 
           // 绘制图片
           const ctx = canvas.getContext('2d')
           if (!ctx) {
+            URL.revokeObjectURL(url)
             reject(new Error('无法创建 Canvas 上下文'))
             return
           }
@@ -144,6 +294,7 @@ export async function convertPngToJpeg(
           canvas.toBlob(
             (jpegBlob) => {
               if (!jpegBlob) {
+                URL.revokeObjectURL(url)
                 reject(new Error('转换 JPEG 失败'))
                 return
               }
@@ -196,28 +347,73 @@ export async function saveImageToVault(
     // 规范化文件夹路径
     const normalizedFolder = normalizePath(folderPath)
 
-    // 检查文件夹是否存在，不存在则创建
-    const folder = vault.getAbstractFileByPath(normalizedFolder)
-    if (!(folder instanceof TFolder)) {
-      log(`创建文件夹: ${normalizedFolder}`)
-      await vault.createFolder(normalizedFolder)
-    }
+    // 检查文件夹是否存在，不存在则创建。
+    // ⚠️ 并发安全：同篇图片是有界并发下载的，多路会同时走到这里；先查后建之间
+    // 另一路可能已经把目录建好，而 metadata cache 未必已收录 → createFolder 抛
+    // 「Folder already exists」。这不是错误，必须吞掉继续，否则整张图会本地化失败
+    // （2026-07-26 实测：image-localization 偶发只改写一半，pending retryCount=1）。
+    await ensureFolderExists(vault, normalizedFolder)
 
     // 完整文件路径
     const filePath = normalizePath(`${normalizedFolder}/${fileName}`)
 
-    // 检查文件是否已存在
+    // 同名文件只有在内容逐字节一致时才能复用；采样摘要本身允许碰撞。
     const existingFile = vault.getAbstractFileByPath(filePath)
-    if (existingFile) {
-      log(`文件已存在，跳过: ${filePath}`)
+    if (!existingFile) {
+      try {
+        await vault.createBinary(filePath, data)
+        log(`图片保存成功: ${filePath}`)
+        return filePath
+      } catch (error) {
+        // 并发保存可能在 get 与 create 之间创建同一路径；用 adapter 直读复查
+        // （不能只信 metadata cache，它未必已收录另一路刚写出的文件）。
+        const raced = await inspectRacedPath(vault, filePath, data)
+        if (raced === 'same') {
+          log(`并发写入同一路径且内容相同，复用: ${filePath}`)
+          return filePath
+        }
+        // 'different' → 落到下面的碰撞命名分支；'unreadable' → 创建失败另有原因，如实抛出
+        if (raced === 'unreadable') throw error
+      }
+    } else if (await fileHasSameContent(vault, existingFile, data)) {
+      log(`文件内容相同，复用: ${filePath}`)
       return filePath
     }
 
-    // 保存文件
-    await vault.createBinary(filePath, data)
-    log(`图片保存成功: ${filePath}`)
+    // 采样摘要撞名时才计算整包指纹。完整指纹使同一份内容稳定命中同一路径；
+    // 若该指纹路径也被不同内容占用，则稳定序号确保仍不覆盖任何已有文件。
+    const contentFingerprint = calculateHexMD5(new Uint8Array(data))
+    for (let sequence = 0; ; sequence++) {
+      const suffix = sequence === 0
+        ? `-${contentFingerprint}`
+        : `-${contentFingerprint}-${sequence}`
+      const collisionFileName = appendFileNameSuffix(fileName, suffix)
+      const collisionPath = normalizePath(
+        `${normalizedFolder}/${collisionFileName}`,
+      )
+      const collisionFile = vault.getAbstractFileByPath(collisionPath)
 
-    return filePath
+      if (!collisionFile) {
+        try {
+          await vault.createBinary(collisionPath, data)
+          log(`摘要撞名，图片保存为: ${collisionPath}`)
+          return collisionPath
+        } catch (error) {
+          const raced = await inspectRacedPath(vault, collisionPath, data)
+          if (raced === 'same') {
+            log(`并发写入碰撞路径且内容相同，复用: ${collisionPath}`)
+            return collisionPath
+          }
+          if (raced === 'unreadable') throw error
+          continue   // 'different' → 换下一个序号继续找空位
+        }
+      }
+
+      if (await fileHasSameContent(vault, collisionFile, data)) {
+        log(`碰撞文件内容相同，复用: ${collisionPath}`)
+        return collisionPath
+      }
+    }
   } catch (error) {
     logError(`保存图片失败: ${folderPath}/${fileName}`, error)
     throw error

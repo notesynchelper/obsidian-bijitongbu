@@ -1,0 +1,66 @@
+# 打 tag 即发版：lint → 单测 → 生产构建 → 生成 build provenance 证明 → 创建 GitHub Release。
+#
+# 发行包只由本 workflow 从本仓库源码构建，从不本地上传。任何人都可以验证：
+#   gh attestation verify main.js --repo notesynchelper/obsidian-bijitongbu
+name: Release
+
+on:
+  push:
+    tags: ["*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write # 建 Release
+  id-token: write # 签 provenance
+  attestations: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+
+      - run: npm ci
+
+      # eslint-plugin-obsidianmd —— 与官方插件审核 bot 同一套规则，不过就别发版
+      - run: npm run lint
+
+      - run: npm test
+
+      - run: npm run build
+
+      # tag 和 manifest 版本对不上就别发，免得用户装到版本号错位的包
+      - name: Check tag matches manifest version
+        if: startsWith(github.ref, 'refs/tags/')
+        run: |
+          tag="${GITHUB_REF_NAME#v}"
+          manifest=$(node -p "require('./manifest.json').version")
+          if [ "$tag" != "$manifest" ]; then
+            echo "tag $tag != manifest.json $manifest" >&2
+            exit 1
+          fi
+
+      # 手动跑（workflow_dispatch）只当 lint + test + build 冒烟，不签也不发
+      - name: Attest build provenance
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: |
+            main.js
+            manifest.json
+            styles.css
+
+      - name: Create release
+        if: startsWith(github.ref, 'refs/tags/')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          # 只传 Obsidian 会下载的三个文件；多传（如 versions.json）审核 bot 会报
+          # "extra unsupported files"。
+          gh release create "$GITHUB_REF_NAME" main.js manifest.json styles.css \
+            --title "$GITHUB_REF_NAME" --generate-notes

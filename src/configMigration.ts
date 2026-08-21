@@ -1,18 +1,11 @@
 import { App, Notice, Plugin, normalizePath } from 'obsidian'
-import { DEFAULT_SETTINGS, MergeMode, OmnivoreSettings } from './settings'
+import { DEFAULT_SETTINGS, OmnivoreSettings } from './settings'
 import { log, logError } from './logger'
 
 interface BackupData {
   timestamp: string
   version: string
   settings: OmnivoreSettings
-}
-
-/**
- * 兼容旧版配置 - 用于迁移已废弃的字段
- */
-interface LegacySettings extends OmnivoreSettings {
-  isSingleFile?: boolean  // 已废弃，迁移为 mergeMode
 }
 
 /**
@@ -220,47 +213,54 @@ export class ConfigMigrationManager {
     manifestVersion: string
   ): OmnivoreSettings {
     const userConfigFields = [
-      'apiKey', 'syncAt', 'folder', 'filename', 'customQuery',
+      'apiKey', 'syncAt', 'folder', 'messageFolder', 'filename', 'customQuery',
       'frequency', 'syncOnStart', 'folderDateFormat', 'filenameDateFormat',
       'attachmentFolder', 'mergeMode', 'frontMatterVariables',
       'frontMatterTemplate', 'highlightOrder', 'enableHighlightColorRender',
       'highlightManagerId', 'highlightColorMapping', 'singleFileName',
-      'wechatMessageTemplate'
+      'wechatMessageTemplate',
+      // 以下字段之前遗漏，会导致迁移时被重置为默认值
+      'template', 'endpoint', 'filter',
+      'dateHighlightedFormat', 'dateSavedFormat',
+      'singleFileDateFormat', 'sectionSeparator', 'sectionSeparatorEnd',
+      // 合并文件模板：用户自定义的合并文件样式，迁移 / backup restore 必须保留
+      'mergeFileTemplate',
+      'imageMode', 'enablePngToJpeg', 'jpegQuality',
+      'imageDownloadRetries', 'imageAttachmentFolder',
+      'enableDiaryLinks', 'diaryFolder', 'diaryDateFormat',
+      'diaryAnchor', 'diaryLinkType',
+      // 设备级自动同步（注意：deviceAutoSync 是 map，不能整个替换，下方有专门的合并逻辑）
+      'deviceAutoSyncMigrated',
     ]
 
+    // 基线：DEFAULT + backup，确保 backup 的用户值覆盖默认值（包括空字符串/空数组/false/0）
     const mergedSettings = { ...DEFAULT_SETTINGS, ...backupSettings }
+    const currentRecord = currentSettings as unknown as Record<string, unknown>
+    const defaultRecord = DEFAULT_SETTINGS as unknown as Record<string, unknown>
 
-    // 迁移逻辑：将旧的 isSingleFile 转换为新的 mergeMode
-    const legacySettings = backupSettings as LegacySettings
-    if (legacySettings.isSingleFile !== undefined && !backupSettings.mergeMode) {
-      const oldIsSingleFile = legacySettings.isSingleFile
-      mergedSettings.mergeMode = oldIsSingleFile ? MergeMode.MESSAGES : MergeMode.NONE
-      log('配置迁移：将 isSingleFile 转换为 mergeMode', {
-        isSingleFile: oldIsSingleFile,
-        mergeMode: mergedSettings.mergeMode
-      })
-    }
-
+    // 仅当 current 有非默认值时才覆盖（说明用户在备份之后又改了设置）
     for (const field of userConfigFields) {
       const key = field as keyof OmnivoreSettings
-      const backupValue = backupSettings[key]
-      const currentValue = currentSettings[key]
+      const currentValue = JSON.stringify(currentRecord[field])
+      const defaultValue = JSON.stringify(defaultRecord[field])
 
-      if (this.isValidValue(backupValue)) {
-        ;(mergedSettings as Record<string, unknown>)[key] = backupValue
-        log(`恢复配置字段 ${field}:`, {
-          from: typeof backupValue === 'string' && backupValue.length > 10 ? '***' : backupValue
-        })
-      } else if (this.isValidValue(currentValue)) {
-        ;(mergedSettings as Record<string, unknown>)[key] = currentValue
+      if (this.fieldExists(currentRecord, field) && currentValue !== defaultValue) {
+        ;(mergedSettings as Record<string, unknown>)[key] = currentRecord[field]
+        log(`保留当前配置字段 ${field}（非默认值）`)
       }
     }
+
+    // deviceAutoSync 是 map：逐 deviceId 合并，current 优先（保留本设备最新的手动修改），
+    // backup 里其他设备的条目也要保留（避免多设备配置被单端备份覆盖）
+    const backupMap = backupSettings.deviceAutoSync ?? {}
+    const currentMap = currentSettings.deviceAutoSync ?? {}
+    mergedSettings.deviceAutoSync = { ...backupMap, ...currentMap }
 
     mergedSettings.version = manifestVersion
 
     log('智能合并配置完成', {
-      apiKeyRestored: this.isValidValue(backupSettings.apiKey),
-      syncAtRestored: this.isValidValue(backupSettings.syncAt),
+      apiKeyRestored: !!backupSettings.apiKey,
+      syncAtRestored: !!backupSettings.syncAt,
       version: manifestVersion
     })
 
@@ -268,16 +268,12 @@ export class ConfigMigrationManager {
   }
 
   /**
-   * 检查值是否有效
+   * 检查字段是否存在于对象中（区分"字段不存在"和"用户刻意设为空值"）
    */
-  private isValidValue(value: unknown): boolean {
-    if (value === undefined || value === null) {
-      return false
-    }
-    if (typeof value === 'string') {
-      return value.trim() !== ''
-    }
-    return true
+  fieldExists(obj: Record<string, unknown>, key: string): boolean {
+    // .call 在本 tsconfig（无 strictBindCallApply）下返回 any，显式标回 boolean
+    const hasOwn = Object.prototype.hasOwnProperty.call(obj, key) as boolean
+    return hasOwn && obj[key] !== undefined
   }
 
   /**

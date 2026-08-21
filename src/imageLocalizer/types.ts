@@ -3,6 +3,7 @@
  */
 
 import { TFile } from 'obsidian'
+import { LocalizerItemMeta } from '../common/localizerItemMeta'
 
 /**
  * 图片信息
@@ -34,6 +35,13 @@ export interface LocalizeTask {
   createdAt: number
   /** 重试次数 */
   retryCount: number
+  /**
+   * 笔记的 Item 上下文 snapshot；generateFolderPath 用它给 render() 喂真实
+   * siteName/author/originalUrl/publishedAt 等模板变量。同文件二次 enqueue
+   * 时会在已有 task 上直接覆盖此字段（last-write-wins），与历史
+   * fileSavedAtMap 行为一致。
+   */
+  meta?: LocalizerItemMeta
 }
 
 /**
@@ -67,3 +75,16 @@ export interface ImageProcessOptions {
   /** 重试延迟（毫秒） */
   retryDelay: number
 }
+
+/** detectRemoteImages 的可判别结果，读失败绝不伪装成“确实没有远程图”。 */
+export type RemoteImageDetectionResult =
+  | { status: 'ok'; images: ImageInfo[] }
+  | { status: 'read-failed'; images: [] }
+
+/** enqueueFile 的明确结果，右键入口据此区分无任务与扫描失败。 */
+export type ImageEnqueueResult =
+  | 'enqueued'
+  | 'already-queued'
+  | 'processing'
+  | 'no-remote-images'
+  | 'read-failed'

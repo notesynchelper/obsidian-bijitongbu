@@ -1,66 +1,24 @@
-// Credits go to Liam's Periodic Notes Plugin: https://github.com/liamcain/obsidian-periodic-notes
+// 市场版：改用 Obsidian 官方 AbstractInputSuggest（1.4.10+），替代旧的
+// Popper.js 自制 TextInputSuggest（触碰内部 app.dom/app.keymap，审核不允许）。
 
-import { AbstractInputSuggest, App, TAbstractFile, TFile, TFolder } from 'obsidian'
-
-export class FileSuggest extends AbstractInputSuggest<TFile> {
-  private inputEl: HTMLInputElement
-
-  constructor(app: App, inputEl: HTMLInputElement) {
-    super(app, inputEl)
-    this.inputEl = inputEl
-  }
-
-  getSuggestions(inputStr: string): TFile[] {
-    const abstractFiles = this.app.vault.getAllLoadedFiles()
-    const files: TFile[] = []
-    const lowerCaseInputStr = inputStr.toLowerCase()
-
-    abstractFiles.forEach((file: TAbstractFile) => {
-      if (
-        file instanceof TFile &&
-        file.extension === 'md' &&
-        file.path.toLowerCase().contains(lowerCaseInputStr)
-      ) {
-        files.push(file)
-      }
-    })
-
-    return files
-  }
-
-  renderSuggestion(file: TFile, el: HTMLElement): void {
-    el.setText(file.path)
-  }
-
-  selectSuggestion(file: TFile): void {
-    this.inputEl.value = file.path
-    this.inputEl.trigger('input')
-    this.close()
-  }
-}
+import { AbstractInputSuggest, App, TFolder } from 'obsidian'
 
 export class FolderSuggest extends AbstractInputSuggest<TFolder> {
-  private inputEl: HTMLInputElement
-
-  constructor(app: App, inputEl: HTMLInputElement) {
-    super(app, inputEl)
-    this.inputEl = inputEl
+  constructor(
+    app: App,
+    private readonly folderInputEl: HTMLInputElement,
+  ) {
+    super(app, folderInputEl)
   }
 
   getSuggestions(inputStr: string): TFolder[] {
-    const abstractFiles = this.app.vault.getAllLoadedFiles()
-    const folders: TFolder[] = []
     const lowerCaseInputStr = inputStr.toLowerCase()
-
-    abstractFiles.forEach((folder: TAbstractFile) => {
-      if (
-        folder instanceof TFolder &&
-        folder.path.toLowerCase().contains(lowerCaseInputStr)
-      ) {
-        folders.push(folder)
+    const folders: TFolder[] = []
+    for (const f of this.app.vault.getAllLoadedFiles()) {
+      if (f instanceof TFolder && f.path.toLowerCase().contains(lowerCaseInputStr)) {
+        folders.push(f)
       }
-    })
-
+    }
     return folders
   }
 
@@ -69,8 +27,8 @@ export class FolderSuggest extends AbstractInputSuggest<TFolder> {
   }
 
   selectSuggestion(folder: TFolder): void {
-    this.inputEl.value = folder.path
-    this.inputEl.trigger('input')
+    this.folderInputEl.value = folder.path
+    this.folderInputEl.trigger('input')
     this.close()
   }
 }

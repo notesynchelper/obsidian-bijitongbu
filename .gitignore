@@ -1,19 +1,29 @@
-# Node modules
-node_modules/
+# vscode
+.vscode 
 
-# Build outputs
-*.js.map
+# Intellij
+*.iml
+.idea
 
-# Development files
+# npm
+node_modules
+
+# Don't include the compiled main.js file in the repo.
+# They should be uploaded to GitHub releases instead.
+main.js
+
+# Exclude sourcemaps
+*.map
+
+# obsidian
+data.json
+
+# Exclude macOS Finder (System Explorer) View States
 .DS_Store
-.idea/
-.vscode/
 
-# Logs
-npm-debug.log*
-yarn-debug.log*
-yarn-error.log*
+coverage/
 
-# Environment files
-.env
-.env.local
+test-report.xml
+
+# 本地 QA 截图/临时草稿目录（语言/调试弹窗截图等，随时可再生，不入库）
+.a/

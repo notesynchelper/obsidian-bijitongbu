@@ -1,0 +1,41 @@
+# 每次 push / PR 都跑一遍「审核 bot 那套静态扫描 + 单测 + 生产构建」，
+# 保证仓库源码任何时候都能构建出发行包（产物作为 artifact 保留 14 天，方便人工核对）。
+name: Build
+
+on:
+  push:
+    branches: ["main"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+
+      - run: npm ci
+
+      # eslint-plugin-obsidianmd —— 与官方插件审核 bot 同一套规则
+      - run: npm run lint
+
+      - run: npm test
+
+      - run: npm run build
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: plugin-build
+          path: |
+            main.js
+            manifest.json
+            styles.css
+          retention-days: 14
